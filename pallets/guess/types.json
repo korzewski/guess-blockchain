@@ -1,0 +1,12 @@
+{
+    "SessionId": "u128",
+    "Bet": "u32",
+    "GuessValue": "u8",
+    "RandomValue": "u32",
+    "Session": {
+        "id": "SessionId",
+        "random_value": "RandomValue",
+        "first_block": "u32",
+        "last_block": "u32"
+    }
+}
