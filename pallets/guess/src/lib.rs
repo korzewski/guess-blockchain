@@ -8,6 +8,7 @@ use frame_support::{
 	dispatch::{DispatchError},
 	codec::{Encode, Decode},
 	traits::{Randomness},
+	debug,
 };
 use frame_system::{ensure_signed};
 use sp_std::{result::{Result}};
@@ -43,6 +44,8 @@ struct Session {
 decl_storage! {
 	trait Store for Module<T: Config> as Guess {
 		Sessions: map hasher(blake2_128_concat) SessionId => Option<Session>;
+		SessionLength: T::BlockNumber = T::BlockNumber::from(5u8);
+
 		Bets: double_map hasher(blake2_128_concat) SessionId, hasher(blake2_128_concat) T::AccountId => Option<(GuessValue, Bet)>;
 
 		CurrentSessionId: SessionId;
@@ -76,6 +79,12 @@ decl_module! {
 
 			let session = Self::get_current_session(&sender)?;
 			Bets::<T>::insert(session.id, sender, (guess, bet));
+		}
+
+		fn on_finalize(block_number: T::BlockNumber) {
+			if frame_system::Module::<T>::block_number() % SessionLength::<T>::get() == T::BlockNumber::from(0u8) {
+				debug::info!("on_finalize() - block: {:?}", block_number);
+			}
 		}
 	}
 }
