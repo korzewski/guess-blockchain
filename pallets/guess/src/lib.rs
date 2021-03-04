@@ -9,9 +9,10 @@ use frame_support::{
 	codec::{Encode, Decode},
 	traits::{Randomness},
 	debug,
+	ensure,
 };
 use frame_system::{ensure_signed};
-use sp_std::{result::{Result}};
+use sp_std::{result::{Result}, prelude::{Vec}};
 use sp_runtime::{
 	RandomNumberGenerator,
 	traits::{BlakeTwo256, Hash}
@@ -28,42 +29,22 @@ pub trait Config: frame_system::Config {
 	type Randomness: Randomness<Self::Hash>;
 }
 
-type SessionId = u128;
-type Bet = u32;
-type GuessValue = u8;
-type RandomValue = u32;
+type SessionIdType = u128;
+type BetType = u32;
+type RandomType = u32;
 
-#[derive(Encode, Decode, Default, Clone)]
-struct Session {
-	id: SessionId,
-	random_value: RandomValue,
-	first_block: u32,
-	last_block: u32,
+#[derive(Encode, Decode, Clone, PartialEq, Eq, Debug)]
+pub struct Bet<AccountId> {
+	account_id: AccountId,
+	guess: RandomType,
+	bet: BetType,
 }
 
 decl_storage! {
 	trait Store for Module<T: Config> as Guess {
-		Sessions: map hasher(blake2_128_concat) SessionId => Option<Session>;
-		SessionLength: T::BlockNumber = T::BlockNumber::from(5u8);
-
-		Bets: double_map hasher(blake2_128_concat) SessionId, hasher(blake2_128_concat) T::AccountId => Option<(GuessValue, Bet)>;
-
-		CurrentSessionId: SessionId;
-		NextSessionId: SessionId;
-
-		TemporaryRandomTest: map hasher(blake2_128_concat) RandomValue => u8;
-	}
-}
-
-decl_event!(
-	pub enum Event<T> where <T as frame_system::Config>::AccountId {
-		NewSessionCreated(AccountId, SessionId, RandomValue),
-	}
-);
-
-decl_error! {
-	pub enum Error for Module<T: Config> {
-		SessionIdOverflow,
+		SessionId: SessionIdType;
+		SessionLength: T::BlockNumber = T::BlockNumber::from(10u8);
+		Bets: map hasher(blake2_128_concat) SessionIdType => Vec<Bet<T::AccountId>>;
 	}
 }
 
@@ -74,62 +55,82 @@ decl_module! {
 		fn deposit_event() = default;
 
 		#[weight = 1000]
-		pub fn join_to_session(origin, guess: GuessValue, bet: Bet) {
-			let sender = ensure_signed(origin)?;
+		pub fn add_new_bet(origin, guess: RandomType, bet: BetType) {
+			let account_id = ensure_signed(origin)?;
+			let session_id = SessionId::get();
 
-			let session = Self::get_current_session(&sender)?;
-			Bets::<T>::insert(session.id, sender, (guess, bet));
+			let new_bet = Bet {
+				account_id,
+				guess,
+				bet,
+			};
+
+			let mut session_bets = Bets::<T>::get(session_id);
+			session_bets.push(new_bet.clone());
+
+			Bets::<T>::insert(session_id, session_bets);
+
+			Self::deposit_event(RawEvent::NewBet(session_id, new_bet));
 		}
 
 		fn on_finalize(block_number: T::BlockNumber) {
-			if frame_system::Module::<T>::block_number() % SessionLength::<T>::get() == T::BlockNumber::from(0u8) {
-				debug::info!("on_finalize() - block: {:?}", block_number);
+			if block_number % SessionLength::<T>::get() == T::BlockNumber::from(0u8) {
+				match Self::finalize_the_session(block_number) {
+					Ok(_) => (),
+					Err(err) => {
+						debug::info!("--- error --- finalize_the_session {:?}", err);
+						()
+					}
+				}
 			}
 		}
 	}
 }
 
 impl<T: Config> Module<T> {
-	fn create_new_session(sender: &T::AccountId) -> Result<Session, DispatchError> {
-		let session = Session {
-			id: Self::next_session_id()?,
-			random_value: Self::get_random_number(sender),
-			// TODO - GET CURRENT BLOCK ID
-			first_block: 0,
-			last_block: 0,
-		};
+	fn finalize_the_session(block_number: T::BlockNumber) -> Result<(), DispatchError> {
+		debug::info!("--- finalize_the_session() - block: {:?}", block_number);
+		
+		let random_guess = Self::get_random_number();
+		let session_id = Self::next_session_id()?;
+		
+		let session_bets = Bets::<T>::get(session_id);
+		
+		ensure!(session_bets.len() > 1, Error::<T>::NotEnoughBets);
+		
+		let mut winner = session_bets[0].clone();
+		let mut winner_guess_diff = Self::get_guess_diff(random_guess, winner.guess);
 
-		Sessions::insert(session.id, session.clone());
-		CurrentSessionId::put(session.id);
+		for bet in session_bets {
+			let guess_diff = Self::get_guess_diff(random_guess, bet.guess);
+			debug::info!("--- random_guess: {}, bet.guess: {}, guess_diff: {}", random_guess, bet.guess, guess_diff);
+			
+			if guess_diff < winner_guess_diff {
+				winner = bet;
+				winner_guess_diff = guess_diff;
+			}
+		}
 
-		TemporaryRandomTest::mutate(session.random_value, |x| *x += 1);
+		Self::deposit_event(RawEvent::NewWinner(session_id, random_guess, winner));
 
-		Ok(session)
+		Ok(())
 	}
 
-	fn get_current_session(sender: &T::AccountId) -> Result<Session, DispatchError> {
-		let current_session_id = CurrentSessionId::get();
-
-		let session = match Sessions::get(current_session_id) {
-			Some(x) => x,
-			None => Self::create_new_session(sender)?
-		};
-
-		Ok(session)
+	fn get_guess_diff(a: RandomType, b: RandomType) -> RandomType {
+		if a > b { a - b } else { b - a }
 	}
 
-	fn next_session_id() -> Result<SessionId, DispatchError> {
-		let session_id = NextSessionId::get();
+	fn next_session_id() -> Result<SessionIdType, DispatchError> {
+		let session_id = SessionId::get();
 		let next_session_id = session_id.checked_add(1).ok_or(Error::<T>::SessionIdOverflow)?;
-		NextSessionId::put(next_session_id);
+		SessionId::put(next_session_id);
 
 		Ok(session_id)
 	}
 
-	fn get_random_number(sender: &T::AccountId) -> RandomValue {
+	fn get_random_number() -> RandomType {
 		let random_seed = (
 			T::Randomness::random_seed(),
-			sender,
 			<frame_system::Module<T>>::extrinsic_index(),
 		).encode();
 
@@ -138,5 +139,19 @@ impl<T: Config> Module<T> {
 		let mut rng = <RandomNumberGenerator<BlakeTwo256>>::new(random_seed);
 
 		rng.pick_u32(99) + 1
+	}
+}
+
+decl_event!(
+	pub enum Event<T> where <T as frame_system::Config>::AccountId {
+		NewBet(SessionIdType, Bet<AccountId>),
+		NewWinner(SessionIdType, RandomType, Bet<AccountId>),
+	}
+);
+
+decl_error! {
+	pub enum Error for Module<T: Config> {
+		SessionIdOverflow,
+		NotEnoughBets,
 	}
 }
